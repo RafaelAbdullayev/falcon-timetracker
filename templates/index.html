@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Учёт рабочего времени</title>
+<style>
+  :root{--bg:#f5f6f8;--card:#fff;--border:#e2e4e8;--text:#1f2328;--muted:#6b7280;--accent:#2563eb;--danger:#dc2626}
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0;background:var(--bg);color:var(--text)}
+  .container{max-width:1000px;margin:0 auto;padding:24px 16px 64px}
+  h1{font-size:24px;margin:0 0 20px}
+  h2{font-size:16px;margin:0 0 12px}
+  section{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px}
+  form{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  input,select,button{font:inherit;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:#fff}
+  input,select{flex:1 1 200px;min-width:0}
+  button{cursor:pointer;background:var(--accent);color:#fff;border-color:var(--accent)}
+  button.secondary{background:#fff;color:var(--text);border-color:var(--border)}
+  button.danger{background:var(--danger);border-color:var(--danger)}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .muted{color:var(--muted)}
+  .error{color:var(--danger);margin-bottom:12px;background:#fef2f2;border:1px solid #fecaca;padding:8px 12px;border-radius:6px}
+  .empty{color:var(--muted);padding:8px 0}
+  .timer{font-variant-numeric:tabular-nums;font-weight:600}
+  ul.plain{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:8px}
+  ul.plain li{background:#eef2ff;color:#3730a3;padding:4px 10px;border-radius:999px;font-size:14px}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Учёт рабочего времени</h1>
+  <div id="error" class="error" hidden></div>
+
+  <section>
+    <h2>Сотрудники</h2>
+    <form id="add-employee-form">
+      <input id="employee-name" placeholder="Имя сотрудника" maxlength="100" required>
+      <button type="submit">Добавить</button>
+    </form>
+    <ul id="employees" class="plain"></ul>
+  </section>
+
+  <section>
+    <h2>Запустить таймер</h2>
+    <form id="start-form">
+      <select id="start-employee" required></select>
+      <input id="start-task" placeholder="Описание задачи" maxlength="500" required>
+      <button type="submit">Старт</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Активные таймеры</h2>
+    <div id="active-empty" class="empty">Нет запущенных таймеров</div>
+    <table id="active-table" hidden>
+      <thead><tr><th>Сотрудник</th><th>Задача</th><th>Начало</th><th>Прошло</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Отчёт за период</h2>
+    <form id="filter-form">
+      <input type="date" id="filter-from">
+      <input type="date" id="filter-to">
+      <button type="submit">Применить</button>
+      <button type="button" id="filter-reset" class="secondary">Сбросить</button>
+    </form>
+    <div id="report-empty" class="empty" hidden></div>
+    <table id="report-table">
+      <thead><tr><th>Сотрудник</th><th>Записей</th><th>Всего времени</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Записи</h2>
+    <div id="entries-empty" class="empty" hidden>Записей нет</div>
+    <table id="entries-table">
+      <thead><tr><th>Сотрудник</th><th>Задача</th><th>Начало</th><th>Конец</th><th>Длительность</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</div>
+
+<script>
+const state = { employees: [], entries: [], report: [], filter: { from: "", to: "" } };
+const $ = (s) => document.querySelector(s);
+
+const fmtDuration = (sec) => {
+  const s = Math.max(0, Math.floor(sec));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  return [h, m, r].map((x) => String(x).padStart(2, "0")).join(":");
+};
+const fmtDateTime = (iso) => iso ? new Date(iso).toLocaleString("ru-RU") : "—";
+const dur = (e) => {
+  const s = new Date(e.start_time).getTime();
+  const end = e.end_time ? new Date(e.end_time).getTime() : Date.now();
+  return Math.max(0, Math.floor((end - s) / 1000));
+};
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const showError = (m) => { const el = $("#error"); el.hidden = !m; el.textContent = m || ""; };
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  let data = null;
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) throw new Error((data && data.error) || ("Ошибка " + res.status));
+  return data;
+}
+
+async function refresh() {
+  try {
+    showError("");
+    state.employees = await api("/api/employees");
+    const p = new URLSearchParams();
+    if (state.filter.from) p.set("from", state.filter.from);
+    if (state.filter.to) p.set("to", state.filter.to);
+    const q = p.toString() ? "?" + p.toString() : "";
+    [state.entries, state.report] = await Promise.all([
+      api("/api/entries" + q),
+      api("/api/report" + q),
+    ]);
+    render();
+  } catch (e) { showError(e.message); }
+}
+
+const employeeName = (id) => (state.employees.find((x) => x.id === id) || {}).name || ("#" + id);
+
+function render() { renderEmployees(); renderStartSelect(); renderActive(); renderReport(); renderEntries(); }
+
+function renderEmployees() {
+  const ul = $("#employees"); ul.innerHTML = "";
+  if (!state.employees.length) { ul.innerHTML = '<li class="muted">Пока нет сотрудников</li>'; return; }
+  state.employees.forEach((e) => { const li = document.createElement("li"); li.textContent = e.name; ul.appendChild(li); });
+}
+
+function renderStartSelect() {
+  const sel = $("#start-employee"); const prev = sel.value; sel.innerHTML = "";
+  if (!state.employees.length) {
+    const o = document.createElement("option"); o.value = ""; o.textContent = "Сначала добавьте сотрудника"; sel.appendChild(o); return;
+  }
+  state.employees.forEach((e) => { const o = document.createElement("option"); o.value = e.id; o.textContent = e.name; sel.appendChild(o); });
+  if (prev && state.employees.some((e) => String(e.id) === prev)) sel.value = prev;
+}
+
+function renderActive() {
+  const active = state.entries.filter((e) => !e.end_time);
+  const table = $("#active-table"); const tbody = table.querySelector("tbody"); tbody.innerHTML = "";
+  $("#active-empty").hidden = active.length > 0;
+  table.hidden = active.length === 0;
+  active.forEach((e) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${escapeHtml(employeeName(e.employee_id))}</td>
+      <td>${escapeHtml(e.task)}</td>
+      <td>${fmtDateTime(e.start_time)}</td>
+      <td class="timer" data-entry-id="${e.id}">${fmtDuration(dur(e))}</td>
+      <td><button class="danger" data-stop="${e.id}">Стоп</button></td>`;
+    tbody.appendChild(tr);
+  });
+  tbody.querySelectorAll("button[data-stop]").forEach((btn) => {
+    btn.onclick = async () => {
+      try { await api(`/api/entries/${btn.dataset.stop}/stop`, { method: "POST" }); await refresh(); }
+      catch (err) { showError(err.message); }
+    };
+  });
+}
+
+function renderReport() {
+  const tbody = $("#report-table tbody"); tbody.innerHTML = "";
+  const emptyEl = $("#report-empty");
+  const totalEntries = state.report.reduce((a, r) => a + r.entries_count, 0);
+  if (!state.report.length) { emptyEl.hidden = false; emptyEl.textContent = "Сотрудников пока нет"; }
+  else if (totalEntries === 0) { emptyEl.hidden = false; emptyEl.textContent = "За выбранный период записей нет"; }
+  else emptyEl.hidden = true;
+
+  state.report.forEach((r) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${escapeHtml(r.name)}</td><td>${r.entries_count}</td><td class="timer">${fmtDuration(r.total_seconds)}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderEntries() {
+  const tbody = $("#entries-table tbody"); tbody.innerHTML = "";
+  $("#entries-empty").hidden = state.entries.length > 0;
+  state.entries.forEach((e) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${escapeHtml(employeeName(e.employee_id))}</td>
+      <td>${escapeHtml(e.task)}</td>
+      <td>${fmtDateTime(e.start_time)}</td>
+      <td>${e.end_time ? fmtDateTime(e.end_time) : '<span class="muted">идёт…</span>'}</td>
+      <td class="timer">${fmtDuration(dur(e))}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+$("#add-employee-form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const input = $("#employee-name"); const name = input.value.trim(); if (!name) return;
+  try {
+    await api("/api/employees", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    input.value = ""; await refresh();
+  } catch (err) { showError(err.message); }
+};
+
+$("#start-form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const employee_id = Number($("#start-employee").value);
+  const task = $("#start-task").value.trim();
+  if (!employee_id || !task) return;
+  try {
+    await api("/api/entries/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ employee_id, task }) });
+    $("#start-task").value = ""; await refresh();
+  } catch (err) { showError(err.message); }
+};
+
+$("#filter-form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  state.filter.from = $("#filter-from").value;
+  state.filter.to = $("#filter-to").value;
+  await refresh();
+};
+$("#filter-reset").onclick = async () => {
+  $("#filter-from").value = ""; $("#filter-to").value = "";
+  state.filter.from = ""; state.filter.to = "";
+  await refresh();
+};
+
+setInterval(() => {
+  document.querySelectorAll("td.timer[data-entry-id]").forEach((td) => {
+    const e = state.entries.find((x) => x.id === Number(td.dataset.entryId) && !x.end_time);
+    if (e) td.textContent = fmtDuration(dur(e));
+  });
+}, 1000);
+
+refresh();
+</script>
+</body>
+</html>
